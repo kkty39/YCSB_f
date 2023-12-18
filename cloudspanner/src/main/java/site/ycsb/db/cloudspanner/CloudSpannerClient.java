@@ -16,22 +16,8 @@
  */
 package site.ycsb.db.cloudspanner;
 
+import com.google.cloud.spanner.*;
 import com.google.common.base.Joiner;
-import com.google.cloud.spanner.DatabaseId;
-import com.google.cloud.spanner.DatabaseClient;
-import com.google.cloud.spanner.Key;
-import com.google.cloud.spanner.KeySet;
-import com.google.cloud.spanner.KeyRange;
-import com.google.cloud.spanner.Mutation;
-import com.google.cloud.spanner.Options;
-import com.google.cloud.spanner.ResultSet;
-import com.google.cloud.spanner.SessionPoolOptions;
-import com.google.cloud.spanner.Spanner;
-import com.google.cloud.spanner.SpannerOptions;
-import com.google.cloud.spanner.Statement;
-import com.google.cloud.spanner.Struct;
-import com.google.cloud.spanner.StructReader;
-import com.google.cloud.spanner.TimestampBound;
 import site.ycsb.ByteIterator;
 import site.ycsb.Client;
 import site.ycsb.DB;
@@ -40,13 +26,7 @@ import site.ycsb.Status;
 import site.ycsb.StringByteIterator;
 import site.ycsb.workloads.CoreWorkload;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Properties;
-import java.util.Set;
-import java.util.Vector;
+import java.util.*;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.concurrent.TimeUnit;
@@ -74,6 +54,10 @@ public class CloudSpannerClient extends DB {
      * Choose between 'read' and 'query'. Affects both read() and scan() operations.
      */
     static final String READ_MODE = "cloudspanner.readmode";
+    /**
+     * Choose between 'update' and 'query'. Affects only update() operations.
+     */
+    static final String UPDATE_MODE = "cloudspanner.updatemode";
     /**
      * The number of inserts to batch during the bulk loading phase. The default value is 1, which means no batching
      * is done. Recommended value during data load is 1000.
@@ -105,6 +89,8 @@ public class CloudSpannerClient extends DB {
   private static int fieldCount;
 
   private static boolean queriesForReads;
+
+  private static boolean queriesForUpdates;
 
   private static int batchInserts;
 
@@ -192,6 +178,7 @@ public class CloudSpannerClient extends DB {
       fieldCount = Integer.parseInt(properties.getProperty(
           CoreWorkload.FIELD_COUNT_PROPERTY, CoreWorkload.FIELD_COUNT_PROPERTY_DEFAULT));
       queriesForReads = properties.getProperty(CloudSpannerProperties.READ_MODE, "query").equals("query");
+      queriesForUpdates = properties.getProperty(CloudSpannerProperties.UPDATE_MODE, "update").equals("query");
       batchInserts = Integer.parseInt(properties.getProperty(CloudSpannerProperties.BATCH_INSERTS, "1"));
       constructStandardQueriesAndFields(properties);
 
@@ -325,8 +312,54 @@ public class CloudSpannerClient extends DB {
     }
   }
 
+  private Status updateUsingQuery(String table, String key, Map<String, ByteIterator> values){
+    if (values == null || values.isEmpty()) {
+      LOGGER.log(Level.INFO, "updateUsingQuery(): Values are null.");
+      return Status.ERROR;
+    }
+
+    HashSet<String> fields = new HashSet<>(values.keySet());
+    Statement.Builder statementBuilder = Statement.newBuilder("UPDATE " + table + " SET ");
+    // Iterate over the fields and append them to the query
+    boolean firstField = true;
+    for (String field : fields) {
+      if (!firstField) {
+        statementBuilder.append(", ");
+      }
+      statementBuilder.append(field).append(" = @").append(field);
+      firstField = false;
+    }
+    // Append the WHERE clause
+    statementBuilder.append(" WHERE id = @id");
+    // Bind parameters
+    Statement.Builder boundStatementBuilder = statementBuilder.bind("id").to(key);
+    for (Map.Entry<String, ByteIterator> entry : values.entrySet()) {
+      boundStatementBuilder = boundStatementBuilder.bind(entry.getKey()).to(entry.getValue().toString());
+    }
+    Statement query = boundStatementBuilder.build();
+
+    try {
+      dbClient.readWriteTransaction().run(transaction -> {
+        long rowCount = transaction.executeUpdate(query);
+        if (rowCount != 1) {
+          throw new Exception("Expected to update exactly one row.");
+        }
+        return null;
+      });
+      return Status.OK;
+    } catch (AbortedException ae) {
+      return Status.ERROR;
+    } catch(Exception e) {
+      LOGGER.log(Level.INFO, "updateUsingQuery()", e);
+      return Status.ERROR;
+    }
+  }
+
   @Override
   public Status update(String table, String key, Map<String, ByteIterator> values) {
+    if (queriesForUpdates) {
+      return updateUsingQuery(table, key, values);
+    }
     Mutation.WriteBuilder m = Mutation.newInsertOrUpdateBuilder(table);
     m.set(PRIMARY_KEY_COLUMN).to(key);
     for (Map.Entry<String, ByteIterator> e : values.entrySet()) {

@@ -362,12 +362,12 @@ public class CloudSpannerClient extends DB {
 
     try {
       dbClient.readWriteTransaction().run(transaction -> {
-        long rowCount = transaction.executeUpdate(query);
-        if (rowCount != 1) {
-          throw new Exception("Expected to update exactly one row.");
-        }
-        return null;
-      });
+          long rowCount = transaction.executeUpdate(query);
+          if (rowCount != 1) {
+            throw new Exception("Expected to update exactly one row.");
+          }
+          return null;
+        });
       return Status.OK;
     } catch (AbortedException ae) {
       return Status.ERROR;
